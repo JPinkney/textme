@@ -1,0 +1,3 @@
+[submodule "eMail"]
+	path = eMail
+	url = https://github.com/deanproxy/eMail.git
