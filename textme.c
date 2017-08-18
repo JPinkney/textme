@@ -221,26 +221,8 @@ static char *get_email() {
 }
 
 static char *get_email_body(const char *email) {
-	time_t curr_time;
-	time(&curr_time);
-	char *date = ctime(&curr_time);
-
 	char *out = email_body;
-	out[0] = '\0';
-
-	strcat(out, "Date: ");
-	strcat(out, date);
-	strcat(out, "\r\n");
-
-	strcat(out, "To: ");
-	strcat(out, email);
-	strcat(out, "\r\n");
-
-	strcat(out, "From: ");
-	strcat(out, from_address);
-	strcat(out, "\r\n\r\n");
-
-	strcat(out, "Test\r\n.\r\n");
+	strcat(out, "This is an automatic notification for your build finishing. Do not reply to this message.");
 	return out;
 }
 
@@ -348,15 +330,19 @@ static void send_email()
     /* Since the traffic will be encrypted, it is very useful to turn on debug
      * information within libcurl to see what is happening during the transfer.
      */
-    curl_easy_setopt(curl, CURLOPT_VERBOSE, 1L);
+    //curl_easy_setopt(curl, CURLOPT_VERBOSE, 1L);
 
     /* Send the message */
     res = curl_easy_perform(curl);
 
     /* Check for errors */
-    if(res != CURLE_OK)
+    if(res != CURLE_OK) {
       fprintf(stderr, "curl_easy_perform() failed: %s\n",
               curl_easy_strerror(res));
+    }
+    else {
+	    printf("Message sent successfully!\n");
+    }
 
     /* Free the list of recipients */
     curl_slist_free_all(recipients);
@@ -377,7 +363,6 @@ int main(int argc, char **argv)
 	{
 		int result = system(argv[1]);
 		send_email();
-		printf("%d\n", result);
 		return 0;
 	}
 	else 
