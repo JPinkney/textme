@@ -1,17 +1,19 @@
 #include <stdio.h>
+#include <time.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <sys/types.h>
 #include <pwd.h>
+#include <curl/curl.h>
 
 #define DIRNAME ".textme"
 #define PROVIDER_COUNT (23)
 
 static char *homedir, data_dir[4096], phone_file[4096], provider_file[4096], msg_file[4096], username_file[4096], server_file[4096],
 	    password_file[4096], from_address_file[4096], phone[4096], provider[4096], username[256], from_address[256],
-	    port_file[4096], port[256], server[256],password[256];
+	    port_file[4096], port[256], server[256],password[256], email_body[4096];
 
 static char int_to_provider[PROVIDER_COUNT][2][256] = 
 {
@@ -137,7 +139,7 @@ static void get_password_from_user()
         printf("Enter your password: \n");
         fgets(buf, 4096, stdin);
         strcpy(password, buf);
-        provider[strlen(password) - 1] = '\0';
+        password[strlen(password) - 1] = '\0';
         write_to_file(password_file, password);
 }
 
@@ -218,6 +220,152 @@ static char *get_email() {
 	return out;
 }
 
+static char *get_email_body(const char *email) {
+	time_t curr_time;
+	time(&curr_time);
+	char *date = ctime(&curr_time);
+
+	char *out = email_body;
+	out[0] = '\0';
+
+	strcat(out, "Date: ");
+	strcat(out, date);
+	strcat(out, "\r\n");
+
+	strcat(out, "To: ");
+	strcat(out, email);
+	strcat(out, "\r\n");
+
+	strcat(out, "From: ");
+	strcat(out, from_address);
+	strcat(out, "\r\n\r\n");
+
+	strcat(out, "Test\r\n.\r\n");
+	return out;
+}
+
+struct upload_status
+{
+	int lines_read;
+};
+
+static size_t payload_source(void *ptr, size_t size, size_t nmemb, void *userp)
+{
+	struct upload_status *upload_ctx = (struct upload_status *)userp;
+	const char *data;
+
+	if((size == 0) || (nmemb == 0) || ((size*nmemb) < 1)) {
+		return 0;
+	}
+
+	const char *my_msg[] = {email_body, NULL};
+	data = my_msg[upload_ctx->lines_read];
+
+	if(data) {
+		size_t len = strlen(data);
+		memcpy(ptr, data, len);
+		upload_ctx->lines_read++;
+		return len;
+	}
+
+	return 0;
+}
+
+static void send_email()
+{
+	CURL *curl;
+	CURLcode res = CURLE_OK;
+	struct curl_slist *recipients = NULL;
+	struct upload_status upload_ctx;
+
+	upload_ctx.lines_read = 0;
+	curl = curl_easy_init();
+	if(curl) {
+	/* Set username and password */
+	curl_easy_setopt(curl, CURLOPT_USERNAME, username);
+	curl_easy_setopt(curl, CURLOPT_PASSWORD, password);
+
+	/* This is the URL for your mailserver. Note the use of port 587 here,
+	* instead of the normal SMTP port (25). Port 587 is commonly used for
+	* secure mail submission (see RFC4403), but you should use whatever
+	* matches your server configuration. */
+	char server_full[4096];
+	server_full[0] = '\0';
+	strcat(server_full, "smtp://");
+	strcat(server_full, server);
+	strcat(server_full, ":");
+	strcat(server_full, port);
+
+	curl_easy_setopt(curl, CURLOPT_URL, server_full);
+
+	/* In this example, we'll start with a plain text connection, and upgrade
+	* to Transport Layer Security (TLS) using the STARTTLS command. Be careful
+	* of using CURLUSESSL_TRY here, because if TLS upgrade fails, the transfer
+	* will continue anyway - see the security discussion in the libcurl
+	* tutorial for more details. */
+	curl_easy_setopt(curl, CURLOPT_USE_SSL, (long)CURLUSESSL_ALL);
+
+	/* If your server doesn't have a valid certificate, then you can disable
+	* part of the Transport Layer Security protection by setting the
+	* CURLOPT_SSL_VERIFYPEER and CURLOPT_SSL_VERIFYHOST options to 0 (false).
+	*   curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
+	*   curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
+	* That is, in general, a bad idea. It is still better than sending your
+	* authentication details in plain text though.  Instead, you should get
+	* the issuer certificate (or the host certificate if the certificate is
+	* self-signed) and add it to the set of certificates that are known to
+	* libcurl using CURLOPT_CAINFO and/or CURLOPT_CAPATH. See docs/SSLCERTS
+	* for more information. */
+    //curl_easy_setopt(curl, CURLOPT_CAINFO, "/path/to/certificate.pem");
+
+    /* Note that this option isn't strictly required, omitting it will result
+     * in libcurl sending the MAIL FROM command with empty sender data. All
+     * autoresponses should have an empty reverse-path, and should be directed
+     * to the address in the reverse-path which triggered them. Otherwise,
+     * they could cause an endless loop. See RFC 5321 Section 4.5.5 for more
+     * details.
+     */
+    curl_easy_setopt(curl, CURLOPT_MAIL_FROM, from_address);
+
+    /* Add two recipients, in this particular case they correspond to the
+     * To: and Cc: addressees in the header, but they could be any kind of
+     * recipient. */
+
+    char *email = get_email();
+    get_email_body(email);
+
+    recipients = curl_slist_append(recipients, email);
+    curl_easy_setopt(curl, CURLOPT_MAIL_RCPT, recipients);
+
+    /* We're using a callback function to specify the payload (the headers and
+     * body of the message). You could just use the CURLOPT_READDATA option to
+     * specify a FILE pointer to read from. */
+
+    curl_easy_setopt(curl, CURLOPT_READFUNCTION, payload_source);
+    curl_easy_setopt(curl, CURLOPT_READDATA, &upload_ctx);
+    curl_easy_setopt(curl, CURLOPT_UPLOAD, 1L);
+
+    /* Since the traffic will be encrypted, it is very useful to turn on debug
+     * information within libcurl to see what is happening during the transfer.
+     */
+    curl_easy_setopt(curl, CURLOPT_VERBOSE, 1L);
+
+    /* Send the message */
+    res = curl_easy_perform(curl);
+
+    /* Check for errors */
+    if(res != CURLE_OK)
+      fprintf(stderr, "curl_easy_perform() failed: %s\n",
+              curl_easy_strerror(res));
+
+    /* Free the list of recipients */
+    curl_slist_free_all(recipients);
+
+    /* Always cleanup */
+    curl_easy_cleanup(curl);
+  }
+}
+
 int main(int argc, char **argv)
 {
 	if (argc != 2)
@@ -227,20 +375,8 @@ int main(int argc, char **argv)
 	}
 	if (load_config()) 
 	{
-		char cmd[4096];
-
-		char *email = get_email();
-		if (NULL == email)
-		{
-			fprintf(stderr, "Provider %s does not have an email-to-text API\n", provider);
-			return 1;
-		}
-
 		int result = system(argv[1]);
-		sprintf(cmd, "/usr/local/bin/email -u '%s' -r %s -i '%s' -f '%s' -p %s -m plain --tls %s < '%s'",
-			       	username, server, password, from_address, port, email, msg_file);
-		//printf("%s\n", cmd);
-		result = system(cmd);
+		send_email();
 		printf("%d\n", result);
 		return 0;
 	}
